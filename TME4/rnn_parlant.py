@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 from torch.optim import Adam
 import matplotlib.pyplot as plt
+from sklearn.feature_extraction.text import CountVectorizer
 
 class RNN(nn.Module):
     def __init__(self, input_size, latent, n_class, batch_size):
@@ -48,24 +49,12 @@ class RNN(nn.Module):
 # def train(rnn, loss, optim, temp, cities, epoch,):
     # for e in range(epoch):
     
-def main_pred_city_from_temps(cities, temp):
-    target = pd.Categorical(pd.Series(temp.columns[1:]))
-    target = pd.get_dummies(target) # one hot encoder
-    target = torch.tensor(target.values)
-    
-    # target = DataLoader(target)
-    temp = temp.drop(columns="datetime")
-    temp = temp.fillna(temp.median())
-    # temp = temp.drop(axis=0)
-    temp = torch.tensor(temp.values)
-    # temp = DataLoader(temp)
-    
-    # print(target.shape)
-    
+def main_pred_city_from_temps(letter_vec):
+    temp = np.array(letter_vec)
+
     input_size = 1
     latent_size = 10
     batch_size = 8
-    test_size = 100
     
     rnn = RNN(input_size, latent_size, batch_size=batch_size, n_class=30).double()
     loss = nn.CrossEntropyLoss()
@@ -73,32 +62,16 @@ def main_pred_city_from_temps(cities, temp):
     
     sequence_size = 10
     iter_max = 10000
-    
-    # création jeu de test
-    test_indice = np.random.randint(temp.shape[0] - test_size , temp.shape[0] - sequence_size, batch_size)
-    test_indice_ville = np.random.randint(0,len(target),batch_size)
-    test_x = []
-    test_y = []
-    for indice,i in enumerate(test_indice):
-        test_x.append(temp[i:i+sequence_size,test_indice_ville[indice]])
-        test_y.append(np.argmax(target[test_indice_ville[indice]]))
-    test_x = torch.stack(test_x).transpose(0, 1).unsqueeze(2)
-    test_y = torch.stack(test_y).long()
-    test_x.requires_grad = False
-    test_y.requires_grad = False
-    
 
-    print(temp.shape)
-    print(target.shape)
+
     list_loss = []
     for e in range(iter_max):
-        indices_batch = np.random.randint(0, temp.shape[0] - test_size - sequence_size, batch_size)
-        indice_ville = np.random.randint(0,len(target),batch_size)
+        indices_batch = np.random.randint(0, temp.shape[0] - sequence_size-1, batch_size)
         batch_x = []
         batch_y = []
         for indice,i in enumerate(indices_batch):
-            batch_x.append(temp[i:i+sequence_size,indice_ville[indice]])
-            batch_y.append(np.argmax(target[indice_ville[indice]]))
+            batch_x.append(temp[i:i+sequence_size])
+            batch_y.append(temp[i+sequence_size+1])
         batch_x = torch.stack(batch_x).transpose(0, 1).unsqueeze(2)
         batch_y = torch.stack(batch_y).long()
         
@@ -112,24 +85,14 @@ def main_pred_city_from_temps(cities, temp):
         l.backward()
         optim.step()
 
-        """
-        if np.isnan(l.item()):
-            print("batchx", batch_x)
-            print(indices_batch)
-            print(indice_ville)
-            print(batch_y)
-            print(y_pred)
-            assert 0
-        """
-    
-    #print(list_loss)
     plt.plot(list_loss)
     plt.show()
 
 def main():
-    cities = pd.read_csv("city_attributes.csv")
-    temp = pd.read_csv("temp_train.csv")
-    main_pred_city_from_temps(cities, temp)
+    all_txt = " ".join(open("descarte.txt").readlines())
+    all_txt_vect = [ord(l) for l in all_txt]
+    print(len(all_txt_vect))
+    main_pred_city_from_temps(all_txt_vect)
 
 if __name__ == '__main__':
     main()

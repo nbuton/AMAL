@@ -3,32 +3,32 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.optim import Adam
+from sklearn.preprocessing import StandardScaler
 import matplotlib.pyplot as plt
 
 class RNN(nn.Module):
-    def __init__(self, input_size, latent, n_class, batch_size):
+    def __init__(self, input_size, latent, batch_size):
         super(RNN, self).__init__()
         self.repeated_block = nn.Linear(input_size + latent, latent)
         self.activation = nn.Tanh()
-        self.default_ini_h = torch.zeros((batch_size, latent))
-        assert self.default_ini_h.requires_grad == False
+        self.latent_size = latent
         
-        self.linear_classifier = nn.Linear(latent, n_class)
+        self.linear_reg = nn.Linear(latent, input_size)
         
 
     def forward(self, x, h=None):
         """
         x:      length, batch, dim
         h:              batch, latent
-        return: length, batch, latent
+        return: length, batch, dim
         """
         if h is None:
-            h = self.default_ini_h
+            h = torch.zeros((x.shape[1], self.latent_size))
         
         for l in range(x.shape[0]):
             h = self.one_step(x[l], h)
         
-        res = self.linear_classifier(h)
+        res = self.linear_reg(h)
         return res
     
     def one_step(self, x, h):
@@ -37,8 +37,8 @@ class RNN(nn.Module):
         h:      batch, latent
         return; batch, latent
         """
-        # print("x", x.shape)
-        # print("h", h.shape)
+        #print("x", x.shape)
+        #print("h", h.shape)
         concat = torch.cat((x.double().transpose(0, 1), h.double().transpose(0, 1)))
         concat = concat.transpose(0, 1)
         res = self.repeated_block(concat)
@@ -48,63 +48,53 @@ class RNN(nn.Module):
 # def train(rnn, loss, optim, temp, cities, epoch,):
     # for e in range(epoch):
     
-def main_pred_city_from_temps(cities, temp):
-    target = pd.Categorical(pd.Series(temp.columns[1:]))
-    target = pd.get_dummies(target) # one hot encoder
-    target = torch.tensor(target.values)
-    
-    # target = DataLoader(target)
+def main_pred_city_from_temps(temp):
     temp = temp.drop(columns="datetime")
+    shape0 = temp.shape
+    scaler = StandardScaler()
+    temp = scaler.fit_transform(temp.values.reshape(-1,1))
+    temp = pd.DataFrame(temp.reshape(shape0))
     temp = temp.fillna(temp.median())
-    # temp = temp.drop(axis=0)
     temp = torch.tensor(temp.values)
-    # temp = DataLoader(temp)
-    
-    # print(target.shape)
-    
-    input_size = 1
-    latent_size = 10
+
+    input_size = 30
+    latent_size = 100
     batch_size = 8
-    test_size = 100
+    test_size = 111
     
-    rnn = RNN(input_size, latent_size, batch_size=batch_size, n_class=30).double()
-    loss = nn.CrossEntropyLoss()
+    rnn = RNN(input_size, latent_size, batch_size=batch_size).double()
+    loss = nn.MSELoss()
     optim = Adam(rnn.parameters(), lr=1e-4)
     
-    sequence_size = 10
-    iter_max = 10000
+    sequence_size = 200
+    iter_max = 1000
     
     # création jeu de test
-    test_indice = np.random.randint(temp.shape[0] - test_size , temp.shape[0] - sequence_size, batch_size)
-    test_indice_ville = np.random.randint(0,len(target),batch_size)
+    test_indice = np.array(range(temp.shape[0] - test_size - sequence_size - 1, temp.shape[0] - sequence_size-1))
     test_x = []
     test_y = []
     for indice,i in enumerate(test_indice):
-        test_x.append(temp[i:i+sequence_size,test_indice_ville[indice]])
-        test_y.append(np.argmax(target[test_indice_ville[indice]]))
-    test_x = torch.stack(test_x).transpose(0, 1).unsqueeze(2)
-    test_y = torch.stack(test_y).long()
+        test_x.append(temp[i:i+sequence_size])
+        test_y.append(temp[i+sequence_size+1])
+    test_x = torch.stack(test_x).transpose(0, 1)
+    test_y = torch.stack(test_y)
     test_x.requires_grad = False
     test_y.requires_grad = False
     
-
-    print(temp.shape)
-    print(target.shape)
     list_loss = []
     for e in range(iter_max):
-        indices_batch = np.random.randint(0, temp.shape[0] - test_size - sequence_size, batch_size)
-        indice_ville = np.random.randint(0,len(target),batch_size)
+        indices_batch = np.random.randint(0, temp.shape[0] - test_size - 2*sequence_size-1, batch_size)
         batch_x = []
         batch_y = []
         for indice,i in enumerate(indices_batch):
-            batch_x.append(temp[i:i+sequence_size,indice_ville[indice]])
-            batch_y.append(np.argmax(target[indice_ville[indice]]))
-        batch_x = torch.stack(batch_x).transpose(0, 1).unsqueeze(2)
-        batch_y = torch.stack(batch_y).long()
+            batch_x.append(temp[i:i+sequence_size])
+            batch_y.append(temp[i+sequence_size+1])
+        batch_x = torch.stack(batch_x).transpose(0, 1)
+        batch_y = torch.stack(batch_y)
         
         test_y_pred = rnn(test_x)
         test_l = loss(test_y_pred, test_y)
-        list_loss.append(test_l.item())
+        list_loss.append(test_l.item() * np.mean(scaler.scale_) )
 
         optim.zero_grad()
         y_pred = rnn(batch_x)
@@ -127,9 +117,8 @@ def main_pred_city_from_temps(cities, temp):
     plt.show()
 
 def main():
-    cities = pd.read_csv("city_attributes.csv")
-    temp = pd.read_csv("temp_train.csv")
-    main_pred_city_from_temps(cities, temp)
+    temp = pd.read_csv("temp_train.csv") 
+    main_pred_city_from_temps(temp)
 
 if __name__ == '__main__':
     main()
