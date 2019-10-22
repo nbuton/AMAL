@@ -1,0 +1,30 @@
+Pour la feature map numéro  0
+Le max de l'activation est de  tensor(227.4390, grad_fn=<SelectBackward>)
+Et cela correspond aux indices suivant :
+tensor([272, 110,  70, 878,   3,   5,   7])
+Et cela correspond à la section de texte suivante :
+▁load▁up▁photos▁to▁the
+Pour la feature map numéro  1
+Le max de l'activation est de  tensor(309.0239, grad_fn=<SelectBackward>)
+Et cela correspond aux indices suivant :
+tensor([238, 135, 128,   3,  95,  14, 631])
+Et cela correspond à la section de texte suivante :
+▁You▁know▁times▁are▁tough
+Pour la feature map numéro  2
+Le max de l'activation est de  tensor(240.5687, grad_fn=<SelectBackward>)
+Et cela correspond aux indices suivant :
+tensor([0, 0, 0, 0, 0, 0, 0])
+Et cela correspond à la section de texte suivante :
+<unk><unk><unk><unk><unk><unk><unk>
+Pour la feature map numéro  3
+Le max de l'activation est de  tensor(259.2635, grad_fn=<SelectBackward>)
+Et cela correspond aux indices suivant :
+tensor([ 13,   3,   3,  22,   8, 140,  50])
+Et cela correspond à la section de texte suivante :
+yssa,▁dere
+Pour la feature map numéro  4
+Le max de l'activation est de  tensor(247.5893, grad_fn=<SelectBackward>)
+Et cela correspond aux indices suivant :
+tensor([479, 287,  11, 652,  11,  26, 295])
+Et cela correspond à la section de texte suivante :
+▁than▁bad▁i▁guess▁i▁m▁she
