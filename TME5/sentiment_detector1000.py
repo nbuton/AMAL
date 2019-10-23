@@ -4,11 +4,15 @@ from tp5_preprocess import *
 import gzip
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
+from torch.optim.lr_scheduler import ExponentialLR 
 from sklearn.metrics import accuracy_score
+import numpy as np
+import heapq
+    
 
 class Sentiment(nn.Module):
     def __init__(self, taille_embedding, taille_dico, conv_feature_maps, fc_layer_size):
-        super(Sentiment, self).__init__()
+        super().__init__()
         self.embed = nn.Embedding(taille_dico, taille_embedding)
 
         l = [nn.Conv1d(taille_embedding, conv_feature_maps[0], kernel_size=3, stride=1, padding=1)]
@@ -40,7 +44,7 @@ class Sentiment(nn.Module):
         r = x.shape[2]
         assert x.shape == (b, f, r)    # b, feature_map_size, rand2
 
-        if(stop_at_feature):
+        if stop_at_feature:
             return x
 
         x = torch.max(x,dim=2)[0]
@@ -61,13 +65,14 @@ class Sentiment(nn.Module):
     def score_to_class(x):
         return x > .5
 
-def main_sentiment(taille_dico, train, test, n_epochs=1, i_max=-1):
+
+def main_train(taille_dico, train, test, n_epochs=1, i_max=-1):
     taille_embedding = 50
-    myCNN = Sentiment(taille_embedding, taille_dico, conv_feature_maps=[10, 5], fc_layer_size=[5, 1])
+    myCNN = Sentiment(taille_embedding, taille_dico, conv_feature_maps=[10, 5], fc_layer_size=[5, 1]) #type: Sentiment
     loss = nn.BCEWithLogitsLoss()
     optim = Adam(myCNN.parameters(), lr=1e-4)
+    scheduler = ExponentialLR(optim, gamma=.999)
     writer = SummaryWriter()
-
     test_data, test_target = test
 
     i = 0
@@ -82,7 +87,7 @@ def main_sentiment(taille_dico, train, test, n_epochs=1, i_max=-1):
 
                 test_classes_pred = myCNN.score_to_class(test_pred)
                 pre = accuracy_score(y_true=test_target, y_pred=test_classes_pred)
-                writer.add_scalars('precision', {'test':pre}, i)
+                writer.add_scalars('accuracy', {'test':pre}, i)
 
             if i == i_max:
                 break
@@ -93,55 +98,61 @@ def main_sentiment(taille_dico, train, test, n_epochs=1, i_max=-1):
 
             classes_pred = myCNN.score_to_class(out)
             pre = accuracy_score(y_true=target, y_pred=classes_pred)
-            writer.add_scalars('precision', {'train': pre}, i)
+            writer.add_scalars('accuracy', {'train': pre}, i)
 
             l.backward()
             optim.step()
-
+            scheduler.step(None)
             i+=1
+    
+    return myCNN
 
-    list_max_fm = [0 for _ in range(5)] #5 car il y a 5 feature map a la fin
-    list_text_max_fm = [[] for _ in range(5)]
 
-    for epoch in range(n_epochs):
-        print("epoch", epoch, "/", n_epochs)
-        for data, target in train:
-            # data shape : b, random
-            #print("data",data.shape)
-            #print(i, "/", len(train))
-            out = myCNN.forward(data,stop_at_feature=True) # b, feature_map_size, rand2
-            rand2 = out.shape[2]
-            #print("out",out.shape)
-            outT = out.transpose(0, 1)  # feature_map_size, b, rand2
-            outT = out.reshape(outT.shape[0], outT.shape[1]*outT.shape[2])  # feature_map_size, b * rand2
-            argMax = torch.max(outT,dim=1)[1] # feature_map, 1
-            maxiF = torch.max(outT,dim=1)[0]
-            for num,argMax_f in enumerate(argMax):
-                #print("argMax_f",argMax_f)
-                n_batch = argMax_f//rand2
-                n_indice = argMax_f%rand2
-                #print("n_batch",n_batch)
-                #print("n_indice",n_indice)
-                if(maxiF[num] > list_max_fm[num]):
-                    list_max_fm[num] = maxiF[num]
-                    if(n_indice != 0):
-                        list_text_max_fm[num] = data[n_batch][n_indice-1:n_indice-1+7]
-                    else:
-                        list_text_max_fm[num] = data[n_batch][0:5]
-
+def main_show(myCNN:Sentiment, train, i_max):
+    n_feat = 5
+    n_per_feat = 10
+    
+    myCNN.eval()
+    
+    # valeur, id, list_ind  # id sert pour la comparaison de deux éléments si leurs valeurs sont égales
+    bests = [[(-np.inf, 0, []) for _ in range(n_per_feat)] for _ in range(n_feat)]
+    
+    for i, (data, _) in enumerate(train):
+        out = myCNN.forward(data, stop_at_feature=True)  # b, feature_map_size, rand2
+        assert n_feat == out.shape[1]
+        rand2 = out.shape[2]
+        outT = out.transpose(0, 1)  # feature_map_size, b, rand2
+        outT = out.reshape(outT.shape[0], outT.shape[1] * outT.shape[2])  # feature_map_size, b * rand2
+        
+        maxiF, argMax = torch.max(outT, dim=1)  # feature_map, 1
+        
+        for i_feat, argMax_f in enumerate(argMax):
+            n_batch = argMax_f // rand2
+            n_indice = argMax_f % rand2
+            val = maxiF[i_feat].item()
+            
+            if val > bests[i_feat][0][0]:
+                if n_indice != 0:
+                    s = data[n_batch][n_indice - 1:n_indice - 1 + 7]
+                else:
+                    s = data[n_batch][0:5]
+                
+                heapq.heapreplace(bests[i_feat], (val, i * n_feat + i_feat, s))
+        
+        if i == i_max:
+            break
+    
     fichier_vocab = open("wp1000.vocab")
     list_vocab = fichier_vocab.readlines()
-    for k in range(len(list_text_max_fm)):
-        print("Pour la feature map numéro ",k)
-        print("Le max de l'activation est de ",list_max_fm[k])
-        print("Et cela correspond aux indices suivant :")
-        print(list_text_max_fm[k])
-        print("Et cela correspond à la section de texte suivante :")
-        pieces = []
-        for token in list_text_max_fm[k]:
-            pieces.append(list_vocab[token].split("\t")[0])
-        phrase = ''.join(pieces).replace('_', ' ')
-        print(phrase)
+    for i_feat in range(n_feat):
+        print("Pour la feature map numéro ", i_feat)
+        for s in bests[i_feat]:
+            pieces = []
+            for token in s[2]:
+                pieces.append(list_vocab[token].split("\t")[0])
+            phrase = ''.join(pieces).replace('_', ' ')
+            print(s[0], phrase)
+        print()
 
 
 def loaddata(f):
@@ -160,7 +171,9 @@ def main():
     test_x, test_y = next(iter(DataLoader(test, batch_size=test_size, collate_fn=TextDataset.collate, shuffle=True)))
 
     print("test data shape", test_x.shape)
-    main_sentiment(taille_dico, train, (test_x, test_y.float()), i_max=10000)
+    cnn = main_train(taille_dico, train, (test_x, test_y.float()), i_max=10000)
+    
+    main_show(cnn, train, i_max=100)
 
 
 if __name__ == '__main__':
