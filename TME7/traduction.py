@@ -1,19 +1,16 @@
-import itertools
-import logging
 from tqdm import tqdm
 import unicodedata
 import string
-
 from torch.utils.data import Dataset, DataLoader
-from torch.nn.utils.rnn import pack_sequence
+import torch.nn.utils.rnn as utilsRNN
 import torch.nn as nn
 from torch.optim import Adam
+import torch.optim.lr_scheduler
 from torch.utils.tensorboard import SummaryWriter
 import torch
-from torch.nn import LSTM, CrossEntropyLoss
-import numpy as np
+from random import random
+from time import time
 
-#### Partie traduction
 
 PAD = 0
 EOS = 1
@@ -22,7 +19,7 @@ SOS = 2
 
 class VocabularyTrad:
     def __init__(self):
-        self.word2id = {"<PAD>": PAD, "<EOS>": EOS, "<SOS>": 2}
+        self.word2id = {"<PAD>": PAD, "<EOS>": EOS, "<SOS>": SOS}
         self.id2word = {PAD: "<PAD>", EOS: "<EOS>", SOS: "<SOS>"}
     
     def get_sentence(self, sentence):
@@ -59,7 +56,7 @@ class TradDataset(Dataset):
             orig, dest = map(normalize, s.split("\t")[:2])
             if len(orig) > max_len: continue
             self.sentences.append((torch.tensor(vocOrig.get_sentence(orig)),
-                                   torch.tensor(vocDest.get_sentence(orig))))
+                                   torch.tensor(vocDest.get_sentence(dest))))
     
     def __len__(self):
         return len(self.sentences)
@@ -68,74 +65,306 @@ class TradDataset(Dataset):
         return self.sentences[i]
 
 
-def my_coll(list_xy):
-    list_x = [data[0] for data in list_xy]
-    list_y = [data[1] for data in list_xy]
+def pad_collate(batch):
+    (xx, yy) = zip(*batch)
+    argsort = sorted(range(len(batch)), key=lambda index: len(xx[index]), reverse=True)
+    xx = [xx[i] for i in argsort]
+    yy = [yy[i] for i in argsort]
     
-    argsort = sorted(range(len(list_xy)), key=lambda index: len(list_x[index]))
-    list_x = [list_x[i] for i in argsort]
-    list_y = [list_y[i] for i in argsort]
+    prefix = torch.tensor([SOS])
     
-    print(list_x)
-    print(list_y)
-    list_x = pack_sequence(list_x)
-    print(list_x)
-    print(list_y)
-    return list_x, list_y
+    xx = [torch.cat((prefix, x)) for x in xx]
+    yy = [torch.cat((prefix, y)) for y in yy]
+        
+    x_lens = [len(x) for x in xx]
+    y_lens = [len(y) for y in yy]
+
+    xx_pad = utilsRNN.pad_sequence(xx)
+    yy_pad = utilsRNN.pad_sequence(yy)
+
+    return (xx_pad, x_lens), (yy_pad, y_lens)
+
+
+class Encoder(nn.Module):
+    def __init__(self, input_dim, emb_dim, hid_dim, n_layers, dropout):
+        super().__init__()
+        
+        self.hid_dim = hid_dim
+        self.n_layers = n_layers
+        
+        self.embedding = nn.Embedding(input_dim, emb_dim)
+        
+        self.rnn = nn.LSTM(emb_dim, hid_dim, n_layers, dropout=dropout)
+        
+        self.dropout = nn.Dropout(dropout)
+    
+    def forward(self, input_, lengths=None):
+        """
+        input:      [seq_len,  batch size]
+        hidden:     [n_layers, batch size, hid_dim]
+        cell:       [n_layers, batch size, hid_dim]"""
+        
+        embedded = self.dropout(self.embedding(input_))
+        # embedded: [seq_len, batch size, emb_dim]
+        
+        if lengths is not None:
+            embedded = utilsRNN.pack_padded_sequence(embedded, lengths)
+        _outputs, (hidden, cell) = self.rnn(embedded)
+        
+        return hidden, cell
+
+
+class Decoder(nn.Module):
+    def __init__(self, output_dim, emb_dim, hid_dim, n_layers, dropout):
+        super().__init__()
+        
+        self.output_dim = output_dim
+        self.hid_dim = hid_dim
+        self.n_layers = n_layers
+        
+        self.embedding = nn.Embedding(output_dim, emb_dim)
+        
+        self.rnn = nn.LSTM(emb_dim, hid_dim, n_layers, dropout=dropout)
+        
+        self.out = nn.Linear(hid_dim, output_dim)
+        
+        self.dropout = nn.Dropout(dropout)
+    
+    def forward(self, input_, hidden, cell, lengths=None):
+        """
+        input:      [seq_len,  batch size]
+        hidden:     [n_layers, batch size, hid_dim]
+        cell:       [n_layers, batch size, hid_dim]
+        prediction: [seq_len,  batch size, output dim]"""
+        
+        embedded = self.dropout(self.embedding(input_))
+        # embedded: [seq_len, batch size, emb_dim]
+        
+        if lengths is not None:
+            embedded = utilsRNN.pack_padded_sequence(embedded, lengths, enforce_sorted=False)
+        
+        output, (hidden, cell) = self.rnn(embedded, (hidden, cell))
+        
+        if lengths is not None:
+            output = utilsRNN.pad_packed_sequence(output)
+        # output: [seq_len, batch size, hid_dim]
+        
+        prediction = self.out(output)
+        
+        return prediction, hidden, cell
+
+
+class Seq2Seq(nn.Module):
+    def __init__(self, encoder, decoder, device):
+        super().__init__()
+        
+        self.encoder = encoder
+        self.decoder = decoder
+        self.device = device
+        assert not encoder.rnn.bidirectional and not decoder.rnn.bidirectional,\
+            "Le décodeur ne peut pas être bidirectionnel, donc l'encodeur non plus"
+        assert encoder.hid_dim == decoder.hid_dim, \
+            "Hidden dimensions of encoder and decoder must be equal!"
+        assert encoder.n_layers == decoder.n_layers, \
+            "Encoder and decoder must have equal number of layers!"
+    
+    def forward(self, src, trg, teacher_forcing_ratio=0.5):
+        """output: [max_len, batch, trg_voc_size]
+        la première ligne ne contient que des zéros
+        
+        src: ([src sent len, batch size], len)
+        trg: ([trg sent len, batch size], len)
+        
+        teacher_forcing_ratio is probability to use teacher forcing
+        """
+        if not self.training and teacher_forcing_ratio!=0:
+            print("warning: teacher in eval mode")
+        
+        src, src_len = src
+        trg, trg_len = trg
+        assert src[0][0] == SOS
+        assert trg[0][0] == SOS
+        assert src[-1][0] == EOS
+        assert torch.any(trg[-1, :] == EOS) # trg n'est pas trié
+        
+        batch_size = trg.shape[1]
+        trg_max_len = trg.shape[0]
+        trg_vocab_size = self.decoder.output_dim
+        
+        #tensor to store decoder outputs
+        outputs = torch.zeros(trg_max_len, batch_size, trg_vocab_size).to(self.device)
+        
+        #last hidden state of the encoder is used as the initial hidden state of the decoder
+        hidden, cell = self.encoder(src, src_len)
+        
+        #first input to the decoder is the <sos> tokens
+        input_ = trg[0]
+        
+        for t in range(1, trg_max_len):
+            #insert input token embedding, previous hidden and previous cell states
+            #receive output tensor (predictions) and new hidden and cell states
+            
+            input_ = input_.unsqueeze(0)
+
+            # lengths = (np.array(trg_len) < t) # 1 si la séquence n'est pas encore finie, 0 sinon
+            # les séquences de taille 0 ne sont pas gérées
+            output, hidden, cell = self.decoder(input_, hidden, cell)
+            
+            output = output.squeeze(0)
+            
+            #place predictions in a tensor holding predictions for each token
+            outputs[t] = output
+            
+            #decide if we are going to use teacher forcing or not
+            teacher_force = random() < teacher_forcing_ratio
+            
+            #get the highest predicted token from our predictions
+            top1 = output.argmax(dim=1)
+            
+            #if teacher forcing, use actual next token as next input
+            #if not, use predicted token
+            input_ = trg[t] if teacher_force else top1
+        
+        return outputs
+
+
+def train(model, data, optimizer, criterion, clip, show=None):
+    if show:
+        src2word = show[0]
+        trg2word = show[1]
+    else:
+        src2word = None
+        trg2word = None
+        
+    model.train()
+    
+    epoch_loss = 0
+    
+    for i, ((src, src_len), (trg, trg_len)) in enumerate(data):
+        optimizer.zero_grad()
+        
+        output = model((src, src_len), (trg, trg_len), teacher_forcing_ratio=1.)
+        
+        #trg = [trg sent len, batch size]
+        #output = [trg sent len, batch size, output dim]
+        
+        if show and random()<.01:
+            print([src2word[x.item()] for x in src[:, 0]])
+            print([trg2word[x.item()] for x in torch.argmax(output[1:, 0], dim=1)])
+            print([trg2word[x.item()] for x in trg[:, 0]])
+            print()
+        
+        output = output[1:].view(-1, output.shape[-1])
+        trg = trg[1:].view(-1)
+        
+        #trg = [(trg sent len - 1) * batch size]
+        #output = [(trg sent len - 1) * batch size, output dim]
+            
+        loss = criterion(output, trg)
+        
+        loss.backward()
+        
+        torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
+        
+        optimizer.step()
+        
+        epoch_loss += loss.item()
+    
+    return epoch_loss / len(data)
+
+
+def evaluate(model, data, criterion):
+    model.eval()
+    
+    epoch_loss = 0
+    
+    with torch.no_grad():
+        for i, ((src, src_len), (trg, trg_len)) in enumerate(data):
+            output = model((src, src_len), (trg, trg_len), teacher_forcing_ratio=0.)  #turn off teacher forcing
+            #trg: [trg sent len, batch size]
+            #output: [trg sent len, batch size, output dim]
+            
+            output = output[1:].view(-1, output.shape[-1])
+            trg = trg[1:].view(-1)
+            #trg: [(trg sent len - 1) * batch size]
+            #output: [(trg sent len - 1) * batch size, output dim]
+            
+            loss = criterion(output, trg)
+            
+            epoch_loss += loss.item()
+    
+    return epoch_loss / len(data)
+
 
 def main():
     with open("fra.txt") as f:
         lines = f.read()
     
-    vocEng = VocabularyTrad()
-    vocFra = VocabularyTrad()
-    datatrain = TradDataset(lines, vocEng, vocFra)
-    for i in range(20000):
-        if torch.any(datatrain[i][0] != datatrain[i][1]):
-            print("diff")
-    exit()
+    SRC = VocabularyTrad()
+    TRG = VocabularyTrad()
+    dataset = TradDataset(lines, SRC, TRG)
+    sizes = [int(len(dataset)*.7), len(dataset) - int(len(dataset)*.7)]
+    dataset_train, dataset_test = torch.utils.data.random_split(dataset, sizes)
     
-    
-    size_in = datatrain[0][0].shape[0]
-    size_hidden = 5
-    num_layers = 3
-    bi = 1 # 2 pour biLSTM
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    INPUT_DIM = len(SRC)
+    OUTPUT_DIM = len(TRG)
     batch_size = 8
+    EMB_DIM = 50
+    HID_DIM = 100
+    N_LAYERS = 2
+    ENC_DROPOUT = .5
+    DEC_DROPOUT = .5
     
-    print(datatrain[0])
+    dataloader_train = DataLoader(dataset_train, batch_size=batch_size, collate_fn=pad_collate)
+    dataloader_test = DataLoader(dataset_test, batch_size=batch_size, collate_fn=pad_collate)
     
-    dataloader = DataLoader(datatrain, collate_fn=my_coll, batch_size=batch_size)
+    enc = Encoder(INPUT_DIM, EMB_DIM, HID_DIM, N_LAYERS, ENC_DROPOUT)
+    dec = Decoder(OUTPUT_DIM, EMB_DIM, HID_DIM, N_LAYERS, DEC_DROPOUT)
     
-    encoder = LSTM(input_size=size_in, hidden_size=size_hidden, num_layers=num_layers)
-    decoder = LSTM(input_size=size_in, hidden_size=size_hidden, num_layers=num_layers)
-    hidden_to_voc = nn.Linear(size_hidden, len(vocFra))
     
-    optimEnc = Adam(encoder.parameters(), lr=1e-4)
-    optimDec = Adam(decoder.parameters(), lr=1e-4)
-    optimHidToVoc = Adam(hidden_to_voc.parameters(), lr=1e-4)
-    optims = [optimEnc, optimDec, optimHidToVoc]
+    model = Seq2Seq(enc, dec, device).to(device)
+    optimizer = Adam(model.parameters())
     
-    criterion = CrossEntropyLoss()
+    PAD_IDX = TRG.word2id['<PAD>']
     
-    for x, y in dataloader:
-        output, (h_n, c_n) = encoder(x)
-        assert h_n.shape == (num_layers * bi, batch_size, size_hidden)
-        assert c_n.shape == (num_layers * bi, batch_size, size_hidden)
+    criterion = nn.CrossEntropyLoss(ignore_index=PAD_IDX)
+    
+    lr_sched = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.95)
+    N_EPOCHS = 100
+    CLIP = 1
+    writer = SummaryWriter()
+    
+    for epoch in range(N_EPOCHS):
+        t0 = time()
+        test_loss = evaluate(model, dataloader_test, criterion)
         
-        list_input = torch.stack((torch.tensor([SOS]), y))
-        y_target = torch.stack((y, torch.tensor([EOS])))                                # FIXME
-        _, (decoded_hidden, _) = decoder(input=list_input, h_0=h_n[-1], c_0=[-1])
-        decoded_word = hidden_to_voc(decoded_hidden)
+        train_loss = train(model, dataloader_train, optimizer, criterion, CLIP,
+                           show=(SRC.id2word, TRG.id2word))
         
-        for optim in optims:
-            optim.zero_grad()
+        writer.add_scalars('loss', {'train':train_loss, 'test':test_loss}, epoch)
         
-        loss = criterion(decoded_word, y_target)
-        loss.backward()
+        print("epoch", epoch, "/", N_EPOCHS, "%.1fs" % (time() - t0))
         
-        for optim in optims:
-            optim.step()
-        
+        lr_sched.step(epoch)
+
+    # dataloader_perf = DataLoader(dataset, batch_size=len(dataset), collate_fn=pad_collate)
+    # (x, x_len), _ = next(iter(dataloader_perf))
+    # enc(x)
+    # enc(x, x_len)
+    # print(sum(x_len) / len(x_len))
+    # print(x_len[:3], x_len[-3:])
+    # print(x.shape)
+    # 
+    # t0 = time()
+    # for _ in range(10):
+    #     enc(x, x_len)
+    # print(time() - t0)
+    # t0 = time()
+    # for _ in range(10):
+    #     enc(x)
+    # print(time() - t0)
 
 if __name__ == '__main__':
     main()
+
