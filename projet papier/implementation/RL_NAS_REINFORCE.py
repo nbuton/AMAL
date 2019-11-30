@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
+
 class ConvNetwork(nn.Module):
     #networkDesc est une liste de couple avec comme premier element le nom du paramettre et le deuxieme l'indice dans le dict
     #Exemple : [("Number_of_filters",0),("Filter_size",3),("Stride",2)]
@@ -46,7 +47,7 @@ class ControllerNetwork(nn.Module):
         self.list_embed_weights = []
         for desc in self.list_desc:
             self.list_embed_weights.append(nn.Linear(hidden_size,embedding_size))
-        soft = nn.Softmax()
+        self.soft = nn.Softmax()
 
 
     def forward(self, inutile):
@@ -58,7 +59,7 @@ class ControllerNetwork(nn.Module):
             h_n,c_n = self.rnn(x, (h, c))
             h = h_n[-1]
             c = c_n[-1]
-            decision = soft(embed(h))
+            decision = self.soft(embed(h))
             all_decision = torch.concat(all_decision, decision)
             x = torch.matmul(embed.weight.t(), decision)
         return all_decision
