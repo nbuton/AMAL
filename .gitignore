@@ -1,7 +1,7 @@
 TME3/mnist_train.csv
 TME3/mnist_test.csv
-TME1/BostonHousing.csv
-TME1/BostonHousing.csv
+TME1/*.csv
+TME2/*.csv
 *.csv
 *.pkl
 *.tar.gz
