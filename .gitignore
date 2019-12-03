@@ -6,3 +6,6 @@ TME2/*.csv
 *.pkl
 *.tar.gz
 data/*
+TME9/glove.6B.50d.txt
+TME9/imdb_train.pickle
+TME9/matrice_glove.pickle
