@@ -33,19 +33,27 @@ class Reseaux_ex_0(nn.Module):
 class Reseaux_ex_1(nn.Module):
     def __init__(self, taille_embedding, glove_weight):
         super().__init__()
+        self.taille_embedding = taille_embedding
         self.embedding = nn.Embedding.from_pretrained(glove_weight)
         self.fc = nn.Linear(taille_embedding,2)
-        self.query = nn.Linear(taille_embedding,taille_embedding)
+        self.q = torch.nn.Parameter(torch.ones(taille_embedding))
         self.bias = torch.nn.Parameter(torch.zeros(taille_embedding))
+        torch.nn.init.uniform_(self.q, a=-0.0, b=1.0)
 
     def forward(self, x):
+        taille_seq = x.shape[1]
+        batch_size = x.shape[0]
         x = self.embedding(x)
-        x_mean = torch.mean(x,dim=1)
-        q = self.query(x_mean)
-        print(q.shape)
-        print(x.shape)
-        P_a_t = q@x + self.bias
-        print(P_a_t.shape)
+        q_exp = self.q.expand((batch_size,taille_seq,self.taille_embedding))
+        #print(x.shape)
+        #print(q_exp.shape)
+        #print(self.bias.shape)
+        P_a_t = torch.nn.functional.softmax(torch.mul(q_exp,x) + self.bias)
+        #print(P_a_t.shape)
+        #print(x.shape)
+        x = torch.mul(P_a_t,x)
+        x = torch.sum(x,dim=1)
+        #print(x.shape)
         x = self.fc(x)
         return x
 
@@ -78,23 +86,25 @@ train_loader = data_utils.DataLoader(dataset = train, batch_size = batch_size, s
 
 EMBEDDING_SIZE = 50
 reseau_0 = Reseaux_ex_1(EMBEDDING_SIZE,matrice_glove)
-optimizer = torch.optim.Adam(reseau_0.parameters(),lr=10e-5)
+optimizer = torch.optim.Adam(reseau_0.parameters(),lr=10e-6)
 criterion = torch.nn.BCEWithLogitsLoss()
 all_losses = []
 all_correct = []
-for i, (data, label) in enumerate(train_loader):
-    if(i%100 == 0):
-        print("J'ai fait",i,"étapes")
-    pred = reseau_0(data)
-    loss = criterion(pred,label)
-    all_losses.append(loss)
-    loss.backward()
-    optimizer.step()
-    #print(pred.shape)
-    pred = pred.transpose(0,1)
-    new_pred = torch.tensor([torch.argmax(pred_ind) for pred_ind in pred])
-    correct = (label.eq(new_pred.long())).sum()
-    all_correct.append(correct)
+EPOCH = 5
+for epoch in range(EPOCH):
+    for i, (data, label) in enumerate(train_loader):
+        if(i%100 == 0):
+            print("J'ai fait",i,"étapes")
+        pred = reseau_0(data)
+        loss = criterion(pred,label)
+        all_losses.append(loss)
+        loss.backward()
+        optimizer.step()
+        #print(pred.shape)
+        pred = pred.transpose(0,1)
+        new_pred = torch.tensor([torch.argmax(pred_ind) for pred_ind in pred])
+        correct = (label.eq(new_pred.long())).sum()
+        all_correct.append(correct)
 
 plt.plot(all_losses)
 plt.show()
