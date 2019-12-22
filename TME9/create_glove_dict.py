@@ -7,7 +7,7 @@ df = pd.read_csv('~/datasets/glove/glove.6B.50d.txt', sep=" ", quoting=3, header
 glove = {key: val.values for key, val in df.T.items()}
 print(time()-t0)
 
-with open('glove.6B.50d.pkl', 'wb') as fp:
+with open('/home/keyvan/datasets/glove/glove.6B.50d.pkl', 'wb') as fp:
     pickle.dump(glove, fp)
 
 t0=time()
