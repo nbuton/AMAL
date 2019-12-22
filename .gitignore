@@ -9,3 +9,5 @@ data/*
 TME9/glove.6B.50d.txt
 TME9/imdb_train.pickle
 TME9/matrice_glove.pickle
+
+*events.out.tfevents*
